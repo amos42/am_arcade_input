@@ -38,13 +38,18 @@
 #include <asm/io.h>
 #include <linux/version.h>
 
-MODULE_AUTHOR("Matthieu Proucelle");
+MODULE_AUTHOR("Amos42");
 MODULE_DESCRIPTION("GPIO and MCP23017 and Multiplexer and 74HC165 Arcade Joystick Driver");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("MIT");
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 #define HAVE_TIMER_SETUP
 #endif
+
+#include "mk_arcade_gpio.h"
+#include "MCP23017.h"
+#include "Multiplexer.h"
+#include "74HC165.h"
 
 
 #define MK_MAX_DEVICES		9
@@ -69,50 +74,6 @@ MODULE_LICENSE("GPL");
 
 #define BSC1_BASE		(PERI_BASE + 0x804000)
 
-
-/*
- * MCP23017 Defines
- */
-#define MPC23017_GPIOA_MODE		0x00
-#define MPC23017_GPIOB_MODE		0x01
-#define MPC23017_GPIOA_PULLUPS_MODE	0x0c
-#define MPC23017_GPIOB_PULLUPS_MODE	0x0d
-#define MPC23017_GPIOA_READ             0x12
-#define MPC23017_GPIOB_READ             0x13
-
-/*
- * Defines for I2C peripheral (aka BSC, or Broadcom Serial Controller)
- */
-
-#define BSC1_C		*(bsc1 + 0x00)
-#define BSC1_S		*(bsc1 + 0x01)
-#define BSC1_DLEN	*(bsc1 + 0x02)
-#define BSC1_A		*(bsc1 + 0x03)
-#define BSC1_FIFO	*(bsc1 + 0x04)
-
-#define BSC_C_I2CEN	(1 << 15)
-#define BSC_C_INTR	(1 << 10)
-#define BSC_C_INTT	(1 << 9)
-#define BSC_C_INTD	(1 << 8)
-#define BSC_C_ST	(1 << 7)
-#define BSC_C_CLEAR	(1 << 4)
-#define BSC_C_READ	1
-
-#define START_READ	BSC_C_I2CEN|BSC_C_ST|BSC_C_CLEAR|BSC_C_READ
-#define START_WRITE	BSC_C_I2CEN|BSC_C_ST
-
-#define BSC_S_CLKT	(1 << 9)
-#define BSC_S_ERR	(1 << 8)
-#define BSC_S_RXF	(1 << 7)
-#define BSC_S_TXE	(1 << 6)
-#define BSC_S_RXD	(1 << 5)
-#define BSC_S_TXD	(1 << 4)
-#define BSC_S_RXR	(1 << 3)
-#define BSC_S_TXW	(1 << 2)
-#define BSC_S_DONE	(1 << 1)
-#define BSC_S_TA	1
-
-#define CLEAR_STATUS	BSC_S_CLKT|BSC_S_ERR|BSC_S_DONE
 
 static volatile unsigned *gpio;
 static volatile unsigned *bsc1;
@@ -159,10 +120,6 @@ enum mk_type {
     MK_MAX
 };
 
-#include "mk_arcade_gpio.h"
-#include "MCP23017.h"
-#include "Multiplexer.h"
-#include "74HC165.h"
 
 #define MK_REFRESH_TIME	HZ/100
 
@@ -276,66 +233,6 @@ static void putGpioValue(int gpiono, int onoff) {
         GPIO_CLR = (1 << gpiono);
 }
 
-/* I2C UTILS */
-static void i2c_init(void) {
-    INP_GPIO(2);
-    SET_GPIO_ALT(2, 0);
-    INP_GPIO(3);
-    SET_GPIO_ALT(3, 0);
-}
-
-static void wait_i2c_done(void) {
-    while ((!((BSC1_S) & BSC_S_DONE))) {
-        udelay(100);
-    }
-}
-
-// Function to write data to an I2C device via the FIFO.  This doesn't refill the FIFO, so writes are limited to 16 bytes
-// including the register address. len specifies the number of bytes in the buffer.
-
-static void i2c_write(char dev_addr, char reg_addr, char *buf, unsigned short len) {
-
-    int idx;
-
-    BSC1_A = dev_addr;
-    BSC1_DLEN = len + 1; // one byte for the register address, plus the buffer length
-
-    BSC1_FIFO = reg_addr; // start register address
-    for (idx = 0; idx < len; idx++)
-        BSC1_FIFO = buf[idx];
-
-    BSC1_S = CLEAR_STATUS; // Reset status bits (see #define)
-    BSC1_C = START_WRITE; // Start Write (see #define)
-
-    wait_i2c_done();
-
-}
-
-// Function to read a number of bytes into a  buffer from the FIFO of the I2C controller
-
-static void i2c_read(char dev_addr, char reg_addr, char *buf, unsigned short len) {
-    unsigned short bufidx;
-
-    i2c_write(dev_addr, reg_addr, NULL, 0);
-
-    bufidx = 0;
-
-    memset(buf, 0, len); // clear the buffer
-
-    BSC1_DLEN = len;
-    BSC1_S = CLEAR_STATUS; // Reset status bits (see #define)
-    BSC1_C = START_READ; // Start Read after clearing FIFO (see #define)
-
-    do {
-        // Wait for some data to appear in the FIFO
-        while ((BSC1_S & BSC_S_TA) && !(BSC1_S & BSC_S_RXD));
-
-        // Consume the FIFO
-        while ((BSC1_S & BSC_S_RXD) && (bufidx < len)) {
-            buf[bufidx++] = BSC1_FIFO;
-        }
-    } while ((!(BSC1_S & BSC_S_DONE)));
-}
 
 /*  ------------------------------------------------------------------------------- */
 
